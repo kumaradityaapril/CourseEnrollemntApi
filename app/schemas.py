@@ -1,21 +1,21 @@
-# app/schemas.py
-
 from pydantic import BaseModel, EmailStr
 from typing import List, Optional
+from enum import Enum
 
+# Student schemas
 class StudentBase(BaseModel):
     name: str
     email: EmailStr
 
 class StudentCreate(StudentBase):
-    pass  # Nothing extra needed for creation
+    pass
 
 class StudentRead(StudentBase):
     id: int
-
     class Config:
-        orm_mode = True
+        from_attributes = True
 
+# Faculty schemas
 class FacultyBase(BaseModel):
     name: str
     email: EmailStr
@@ -25,10 +25,10 @@ class FacultyCreate(FacultyBase):
 
 class FacultyRead(FacultyBase):
     id: int
-
     class Config:
-        orm_mode = True
+        from_attributes = True
 
+# Course schemas
 class CourseBase(BaseModel):
     name: str
     credits: int = 3
@@ -39,10 +39,10 @@ class CourseCreate(CourseBase):
 class CourseRead(CourseBase):
     id: int
     faculty_id: int
-
     class Config:
-        orm_mode = True
+        from_attributes = True
 
+# Enrollment schemas
 class EnrollmentBase(BaseModel):
     student_id: int
     course_id: int
@@ -53,13 +53,18 @@ class EnrollmentCreate(EnrollmentBase):
 class EnrollmentRead(EnrollmentBase):
     id: int
     grade: Optional[str] = None
-
     class Config:
-        orm_mode = True
+        from_attributes = True
 
-# Schema for assigning/updating grade
-from pydantic import constr
+# Enum and schema for assigning/updating grade
+class GradeEnum(str, Enum):
+    A = "A"
+    A_minus = "A-"
+    B = "B"
+    B_minus = "B-"
+    C = "C"
+    D = "D"
+    F = "F"
 
 class GradeAssign(BaseModel):
-    enrollment_id: int
-    grade: constr(strip_whitespace=True, min_length=1, max_length=2)
+    grade: GradeEnum
