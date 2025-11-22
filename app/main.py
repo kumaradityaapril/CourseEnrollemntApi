@@ -77,6 +77,24 @@ def delete_student(student_id: int, db: Session = Depends(get_db)):
     db.commit()
     return None
 
+# ---- Day 10: Student's Grade Report ----
+
+@app.get("/students/{student_id}/grades/")
+def get_student_grades(student_id: int, db: Session = Depends(get_db)):
+    """
+    Get all enrolled courses and grades for a specific student.
+    """
+    enrollments = db.query(models.Enrollment).filter(models.Enrollment.student_id == student_id).all()
+    # Also fetch course names for report clarity
+    return [
+        {
+            "course_id": e.course_id,
+            "course_name": db.query(models.Course).filter(models.Course.id == e.course_id).first().name if e.course_id else None,
+            "grade": e.grade
+        }
+        for e in enrollments
+    ]
+
 # ----------------------
 # Faculty CRUD Endpoints
 # ----------------------
@@ -205,6 +223,18 @@ def delete_course(course_id: int, db: Session = Depends(get_db)):
     db.commit()
     return None
 
+# ---- Day 10: Filter Courses by Faculty ----
+
+@app.get("/courses/filter/", response_model=list[schemas.CourseRead])
+def filter_courses(faculty_id: int = None, db: Session = Depends(get_db)):
+    """
+    Get courses taught by a specific faculty member.
+    """
+    query = db.query(models.Course)
+    if faculty_id:
+        query = query.filter(models.Course.faculty_id == faculty_id)
+    return query.all()
+
 # ------------------------
 # Enrollment CRUD Endpoints
 # ------------------------
@@ -256,6 +286,22 @@ def read_enrollment_by_id(enrollment_id: int, db: Session = Depends(get_db)):
     if enrollment is None:
         raise HTTPException(status_code=404, detail="Enrollment not found")
     return enrollment
+
+# ---- Day 10: Filter Enrollments by Student or Course ----
+
+@app.get("/enrollments/filter/", response_model=list[schemas.EnrollmentRead])
+def filter_enrollments(student_id: int = None, course_id: int = None, db: Session = Depends(get_db)):
+    """
+    Get enrollments filtered by student_id or course_id.
+    """
+    query = db.query(models.Enrollment)
+    if student_id:
+        query = query.filter(models.Enrollment.student_id == student_id)
+    if course_id:
+        query = query.filter(models.Enrollment.course_id == course_id)
+    return query.all()
+
+# ------Grade (Update)-----
 
 @app.put("/enrollments/{enrollment_id}/grade", response_model=schemas.EnrollmentRead)
 def update_enrollment_grade(enrollment_id: int, grade: schemas.GradeAssign, db: Session = Depends(get_db)):
