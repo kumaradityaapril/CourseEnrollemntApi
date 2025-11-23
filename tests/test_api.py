@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 from app.main import app
+import time
 
 client = TestClient(app)
 
@@ -9,16 +10,19 @@ def test_root():
     assert resp.json()["message"] == "Hello, FastAPI!"
 
 def test_create_student():
-    # Clean test email to avoid duplicates
-    resp = client.post("/students/", json={"name": "Test Student", "email": "teststudent@example.com"})
+    # Use unique email to avoid duplicates
+    unique_email = f"teststudent_{int(time.time() * 1000)}@example.com"
+    resp = client.post("/students/", json={"name": "Test Student", "email": unique_email})
     assert resp.status_code == 201
     data = resp.json()
     assert "id" in data
     assert data["name"] == "Test Student"
-    assert data["email"] == "teststudent@example.com"
+    assert data["email"] == unique_email
 
 def test_create_and_fetch_faculty():
-    resp = client.post("/faculty/", json={"name": "Test Faculty", "email": "testfaculty@example.com"})
+    # Use unique email to avoid duplicates
+    unique_email = f"testfaculty_{int(time.time() * 1000)}@example.com"
+    resp = client.post("/faculty/", json={"name": "Test Faculty", "email": unique_email})
     assert resp.status_code == 200
     faculty_id = resp.json()["id"]
     resp2 = client.get(f"/faculty/{faculty_id}")
@@ -26,8 +30,11 @@ def test_create_and_fetch_faculty():
     assert resp2.json()["name"] == "Test Faculty"
 
 def test_create_course_and_enrollment():
-    student_resp = client.post("/students/", json={"name": "Enroll Me", "email": "enrollme@example.com"})
-    faculty_resp = client.post("/faculty/", json={"name": "Prof", "email": "prof@example.com"})
+    # Use unique emails to avoid duplicates
+    student_email = f"enrollme_{int(time.time() * 1000)}@example.com"
+    faculty_email = f"prof_{int(time.time() * 1000)}@example.com"
+    student_resp = client.post("/students/", json={"name": "Enroll Me", "email": student_email})
+    faculty_resp = client.post("/faculty/", json={"name": "Prof", "email": faculty_email})
     course_resp = client.post("/courses/", json={
         "name": "Science",
         "credits": 3,

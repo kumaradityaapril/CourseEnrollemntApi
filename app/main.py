@@ -3,16 +3,31 @@ from sqlalchemy.orm import Session
 from .models import Base
 from .database import engine, SessionLocal
 from . import models, schemas
-
 from passlib.context import CryptContext
 import bcrypt
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
+from sqlalchemy import or_, inspect, text
 from typing import List
 
 app = FastAPI()
 Base.metadata.create_all(bind=engine)
+
+# Migration: Add is_active column to users table if it doesn't exist
+def migrate_database():
+    """Add missing columns to existing tables."""
+    inspector = inspect(engine)
+    try:
+        columns = [col['name'] for col in inspector.get_columns('users')]
+        if 'is_active' not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT 1 NOT NULL"))
+    except Exception:
+        # Table doesn't exist yet, will be created by create_all
+        pass
+
+migrate_database()
 
 # ====== Security Setup ======
 try:
@@ -71,7 +86,7 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         if username is None or role is None:
             raise credentials_exception
         user = db.query(models.User).filter(models.User.username == username).first()
-        if user is None:
+        if user is None or not user.is_active:
             raise credentials_exception
         return user
     except JWTError:
@@ -89,20 +104,22 @@ def get_db():
     finally:
         db.close()
 
-# ====== User Authentication ======
+# ====== User Authentication & Management ======
+
 @app.post("/users/", response_model=schemas.UserRead)
 def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     """
     Register a new user (admin, faculty, or student).
     """
-    if db.query(models.User).filter((models.User.username == user.username) | (models.User.email == user.email)).first():
+    if db.query(models.User).filter(or_(models.User.username == user.username, models.User.email == user.email)).first():
         raise HTTPException(status_code=409, detail="Username or email already exists.")
     hashed_pw = get_password_hash(user.password)
     db_user = models.User(
         username=user.username,
         email=user.email,
         password_hash=hashed_pw,
-        role=user.role
+        role=user.role,
+        is_active=True
     )
     db.add(db_user)
     db.commit()
@@ -118,26 +135,21 @@ def login_for_access_token(
     User login (returns JWT access token).
     """
     user = db.query(models.User).filter(models.User.username == form_data.username).first()
-    if not user or not verify_password(form_data.password, user.password_hash):
-        raise HTTPException(status_code=400, detail="Incorrect username or password")
+    if not user or not user.is_active or not verify_password(form_data.password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Incorrect username or password, or account disabled.")
     access_token = create_access_token(
         data={"sub": user.username, "role": user.role}
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
-# ====== Day 13: User Management (Admin only) ======
 @app.get("/users/", response_model=List[schemas.UserRead], dependencies=[Depends(admin_required)])
 def list_users(db: Session = Depends(get_db)):
-    """
-    List all registered users (admin only).
-    """
+    """List all registered users (admin only)."""
     return db.query(models.User).all()
 
 @app.get("/users/{user_id}", response_model=schemas.UserRead, dependencies=[Depends(admin_required)])
 def get_user(user_id: int, db: Session = Depends(get_db)):
-    """
-    Get details of a specific user (admin only).
-    """
+    """Get details of a specific user (admin only)."""
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -150,9 +162,7 @@ class RoleUpdate(BaseModel):
 
 @app.patch("/users/{user_id}/role", response_model=schemas.UserRead, dependencies=[Depends(admin_required)])
 def update_user_role(user_id: int, role_update: RoleUpdate, db: Session = Depends(get_db)):
-    """
-    Update a user's role (admin only).
-    """
+    """Update a user's role (admin only)."""
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -161,12 +171,45 @@ def update_user_role(user_id: int, role_update: RoleUpdate, db: Session = Depend
     db.refresh(user)
     return user
 
+@app.post("/users/{user_id}/change-password")
+def change_password(
+    user_id: int,
+    data: schemas.PasswordChangeRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    Change your password (requires old password).
+    Admin can change any user's password.
+    """
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=404, detail="User not found or disabled.")
+    if current_user.id != user.id and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden: you can't change this user's password.")
+    if current_user.role != "admin":
+        if not verify_password(data.old_password, user.password_hash):
+            raise HTTPException(status_code=400, detail="Old password is incorrect.")
+    new_hashed = get_password_hash(data.new_password)
+    user.password_hash = new_hashed
+    db.commit()
+    return {"detail": "Password changed successfully."}
+
+@app.post("/users/{user_id}/disable", dependencies=[Depends(admin_required)])
+def disable_user(user_id: int, db: Session = Depends(get_db)):
+    """
+    Admin disables (soft deletes) a user, making them unable to log in or use the API.
+    """
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    user.is_active = False
+    db.commit()
+    return {"detail": f"User {user.username} disabled."}
+
 # ========== Student CRUD ==========
 @app.post("/students/", response_model=schemas.StudentRead, status_code=status.HTTP_201_CREATED)
 def create_student(student: schemas.StudentCreate, db: Session = Depends(get_db)):
-    """
-    Create a new student record.
-    """
     db_student = models.Student(name=student.name, email=student.email)
     db.add(db_student)
     db.commit()
@@ -175,16 +218,10 @@ def create_student(student: schemas.StudentCreate, db: Session = Depends(get_db)
 
 @app.get("/students/", response_model=List[schemas.StudentRead])
 def read_students(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
-    """
-    List all students (paginated).
-    """
     return db.query(models.Student).offset(skip).limit(limit).all()
 
 @app.get("/students/{student_id}", response_model=schemas.StudentRead)
 def read_student(student_id: int, db: Session = Depends(get_db)):
-    """
-    Get a student by their ID.
-    """
     student = db.query(models.Student).filter(models.Student.id == student_id).first()
     if student is None:
         raise HTTPException(status_code=404, detail="Student not found")
@@ -192,9 +229,6 @@ def read_student(student_id: int, db: Session = Depends(get_db)):
 
 @app.put("/students/{student_id}", response_model=schemas.StudentRead)
 def update_student(student_id: int, student: schemas.StudentCreate, db: Session = Depends(get_db)):
-    """
-    Update an existing student's information.
-    """
     db_student = db.query(models.Student).filter(models.Student.id == student_id).first()
     if db_student is None:
         raise HTTPException(status_code=404, detail="Student not found")
@@ -206,9 +240,6 @@ def update_student(student_id: int, student: schemas.StudentCreate, db: Session 
 
 @app.delete("/students/{student_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(admin_required)])
 def delete_student(student_id: int, db: Session = Depends(get_db)):
-    """
-    Delete a student (admin only).
-    """
     db_student = db.query(models.Student).filter(models.Student.id == student_id).first()
     if db_student is None:
         raise HTTPException(status_code=404, detail="Student not found")
@@ -218,9 +249,6 @@ def delete_student(student_id: int, db: Session = Depends(get_db)):
 
 @app.get("/students/{student_id}/grades/")
 def get_student_grades(student_id: int, db: Session = Depends(get_db)):
-    """
-    Get all enrollments and grades for a student.
-    """
     enrollments = db.query(models.Enrollment).filter(models.Enrollment.student_id == student_id).all()
     return [
         {

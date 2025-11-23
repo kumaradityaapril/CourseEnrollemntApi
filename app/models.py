@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy import Column, Integer, String, ForeignKey, Boolean
 from sqlalchemy.orm import relationship, declarative_base
 
 Base = declarative_base()
@@ -12,7 +12,8 @@ class User(Base):
     username = Column(String, unique=True, nullable=False, index=True)
     email = Column(String, unique=True, nullable=False, index=True)
     password_hash = Column(String, nullable=False)
-    role = Column(String, nullable=False)  # "admin", "faculty", "student"
+    role = Column(String, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)  # "admin", "faculty", "student"
 
 # ----------------------
 # Student Model

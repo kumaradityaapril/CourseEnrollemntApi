@@ -1,7 +1,6 @@
-from pydantic import BaseModel, EmailStr, ConfigDict, constr
+from pydantic import BaseModel, EmailStr, ConfigDict, constr, Field
 from typing import List, Optional
 from enum import Enum
-from pydantic import Field
 
 # Student schemas
 class StudentBase(BaseModel):
@@ -66,6 +65,7 @@ class GradeEnum(str, Enum):
 class GradeAssign(BaseModel):
     grade: GradeEnum
 
+# User schemas
 class UserBase(BaseModel):
     username: str
     email: EmailStr
@@ -78,3 +78,7 @@ class UserRead(UserBase):
     id: int
     model_config = ConfigDict(from_attributes=True)
 
+# Password change schema (standalone, not nested)
+class PasswordChangeRequest(BaseModel):
+    old_password: constr(min_length=6, max_length=72)
+    new_password: constr(min_length=6, max_length=72)
