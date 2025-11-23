@@ -4,12 +4,154 @@ from .models import Base
 from .database import engine, SessionLocal
 from . import models, schemas
 
-app = FastAPI()
+from passlib.context import CryptContext
+import bcrypt
+from jose import JWTError, jwt
+from datetime import datetime, timedelta
+from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 
-# Ensure tables are created
+app = FastAPI()
 Base.metadata.create_all(bind=engine)
 
-# Dependency for database session
+# Try to initialize passlib, but fall back to bcrypt if it fails
+try:
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    # Force initialization with a safe password
+    _ = pwd_context.hash("test")
+    USE_PASSLIB = True
+except (ValueError, Exception) as e:
+    # If passlib initialization fails (e.g., 72-byte limit error), use bcrypt directly
+    USE_PASSLIB = False
+    pwd_context = None
+SECRET_KEY = "your_random_secret_key_123"  # Replace for production use!
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
+
+# =======================
+# SECURITY UTILITIES
+# =======================
+
+def _ensure_password_max_bytes(password: str, max_bytes: int = 72) -> str:
+    """Ensure password is at most max_bytes when encoded as UTF-8."""
+    if not password:
+        return password
+    
+    # Encode to bytes to check length
+    password_bytes = password.encode('utf-8')
+    
+    # If already within limit, return as-is
+    if len(password_bytes) <= max_bytes:
+        return password
+    
+    # Truncate to max_bytes (bcrypt's limit)
+    truncated_bytes = password_bytes[:max_bytes]
+    
+    # Remove any incomplete UTF-8 sequence at the end
+    # UTF-8 continuation bytes have pattern 10xxxxxx (0x80-0xBF)
+    while truncated_bytes and (truncated_bytes[-1] & 0b11000000) == 0b10000000:
+        truncated_bytes = truncated_bytes[:-1]
+        if len(truncated_bytes) == 0:
+            return ""
+    
+    # Decode back to string
+    password_str = truncated_bytes.decode('utf-8', errors='ignore')
+    
+    # Critical: Verify the decoded string is still <= max_bytes when re-encoded
+    # Keep removing characters until it fits
+    while len(password_str.encode('utf-8')) > max_bytes:
+        if len(password_str) == 0:
+            break
+        password_str = password_str[:-1]
+    
+    return password_str
+
+def get_password_hash(password):
+    # Bcrypt has a 72-byte limit, so truncate if necessary
+    password = _ensure_password_max_bytes(password, 72)
+    
+    # Final verification: ensure password is definitely <= 72 bytes
+    password_bytes = password.encode('utf-8')
+    if len(password_bytes) > 72:
+        # Emergency fallback: truncate to exactly 72 bytes and remove incomplete UTF-8
+        truncated = password_bytes[:72]
+        while truncated and (truncated[-1] & 0b11000000) == 0b10000000:
+            truncated = truncated[:-1]
+        password = truncated.decode('utf-8', errors='ignore')
+        password_bytes = password.encode('utf-8')
+    
+    # Verify one more time
+    final_bytes = password.encode('utf-8')
+    if len(final_bytes) > 72:
+        raise ValueError(f"Password encoding error: {len(final_bytes)} bytes > 72")
+    
+    # Use bcrypt directly if passlib failed to initialize
+    if not USE_PASSLIB:
+        salt = bcrypt.gensalt()
+        hashed = bcrypt.hashpw(final_bytes, salt)
+        return hashed.decode('utf-8')
+    
+    # Try passlib, but fall back to bcrypt if it fails
+    try:
+        return pwd_context.hash(password)
+    except (ValueError, Exception) as e:
+        if "password cannot be longer than 72 bytes" in str(e):
+            # Fall back to bcrypt directly
+            salt = bcrypt.gensalt()
+            hashed = bcrypt.hashpw(final_bytes, salt)
+            return hashed.decode('utf-8')
+        raise
+
+def verify_password(plain_password, hashed_password):
+    # Apply same truncation as in get_password_hash for consistency
+    plain_password = _ensure_password_max_bytes(plain_password, 72)
+    plain_password_bytes = plain_password.encode('utf-8')
+    hashed_password_bytes = hashed_password.encode('utf-8')
+    
+    # Use bcrypt directly if passlib failed to initialize
+    if not USE_PASSLIB:
+        return bcrypt.checkpw(plain_password_bytes, hashed_password_bytes)
+    
+    # Try passlib, but fall back to bcrypt if it fails
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except (ValueError, Exception):
+        # Fall back to bcrypt directly
+        return bcrypt.checkpw(plain_password_bytes, hashed_password_bytes)
+
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(lambda: SessionLocal())):
+    credentials_exception = HTTPException(
+        status_code=401, detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        role: str = payload.get("role")
+        if username is None or role is None:
+            raise credentials_exception
+        user = db.query(models.User).filter(models.User.username == username).first()
+        if user is None:
+            raise credentials_exception
+        return user
+    except JWTError:
+        raise credentials_exception
+
+def admin_required(current_user=Depends(get_current_user)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admins only")
+    return current_user
+
+# =======================
+# DATABASE SESSION DEP
+# =======================
 def get_db():
     db = SessionLocal()
     try:
@@ -17,17 +159,43 @@ def get_db():
     finally:
         db.close()
 
-# -----------------------
-# Student CRUD Endpoints
-# -----------------------
+# =======================
+# USER AUTHENTICATION
+# =======================
+
+@app.post("/users/", response_model=schemas.UserRead)
+def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    hashed_pw = get_password_hash(user.password)
+    db_user = models.User(
+        username=user.username,
+        email=user.email,
+        password_hash=hashed_pw,
+        role=user.role  # "admin", "faculty", "student"
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
+@app.post("/token")
+def login_for_access_token(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
+):
+    user = db.query(models.User).filter(models.User.username == form_data.username).first()
+    if not user or not verify_password(form_data.password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Incorrect username or password")
+    access_token = create_access_token(
+        data={"sub": user.username, "role": user.role}
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+# =======================
+# STUDENT CRUD ENDPOINTS
+# =======================
 
 @app.post("/students/", response_model=schemas.StudentRead, status_code=status.HTTP_201_CREATED)
 def create_student(student: schemas.StudentCreate, db: Session = Depends(get_db)):
-    """
-    Create a new student.
-    - **name**: Full name of the student
-    - **email**: Unique, valid email address
-    """
     db_student = models.Student(name=student.name, email=student.email)
     db.add(db_student)
     db.commit()
@@ -36,16 +204,10 @@ def create_student(student: schemas.StudentCreate, db: Session = Depends(get_db)
 
 @app.get("/students/", response_model=list[schemas.StudentRead])
 def read_students(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
-    """
-    Get a list of all students (paginated).
-    """
     return db.query(models.Student).offset(skip).limit(limit).all()
 
 @app.get("/students/{student_id}", response_model=schemas.StudentRead)
 def read_student(student_id: int, db: Session = Depends(get_db)):
-    """
-    Get a specific student by ID.
-    """
     student = db.query(models.Student).filter(models.Student.id == student_id).first()
     if student is None:
         raise HTTPException(status_code=404, detail="Student not found")
@@ -53,9 +215,6 @@ def read_student(student_id: int, db: Session = Depends(get_db)):
 
 @app.put("/students/{student_id}", response_model=schemas.StudentRead)
 def update_student(student_id: int, student: schemas.StudentCreate, db: Session = Depends(get_db)):
-    """
-    Update a specific student's details.
-    """
     db_student = db.query(models.Student).filter(models.Student.id == student_id).first()
     if db_student is None:
         raise HTTPException(status_code=404, detail="Student not found")
@@ -65,11 +224,8 @@ def update_student(student_id: int, student: schemas.StudentCreate, db: Session 
     db.refresh(db_student)
     return db_student
 
-@app.delete("/students/{student_id}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/students/{student_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(admin_required)])
 def delete_student(student_id: int, db: Session = Depends(get_db)):
-    """
-    Delete a student by ID.
-    """
     db_student = db.query(models.Student).filter(models.Student.id == student_id).first()
     if db_student is None:
         raise HTTPException(status_code=404, detail="Student not found")
@@ -77,15 +233,9 @@ def delete_student(student_id: int, db: Session = Depends(get_db)):
     db.commit()
     return None
 
-# ---- Day 10: Student's Grade Report ----
-
 @app.get("/students/{student_id}/grades/")
 def get_student_grades(student_id: int, db: Session = Depends(get_db)):
-    """
-    Get all enrolled courses and grades for a specific student.
-    """
     enrollments = db.query(models.Enrollment).filter(models.Enrollment.student_id == student_id).all()
-    # Also fetch course names for report clarity
     return [
         {
             "course_id": e.course_id,
@@ -95,15 +245,12 @@ def get_student_grades(student_id: int, db: Session = Depends(get_db)):
         for e in enrollments
     ]
 
-# ----------------------
-# Faculty CRUD Endpoints
-# ----------------------
+# =======================
+# FACULTY CRUD ENDPOINTS
+# =======================
 
 @app.post("/faculty/", response_model=schemas.FacultyRead)
 def create_faculty(faculty: schemas.FacultyCreate, db: Session = Depends(get_db)):
-    """
-    Create a new faculty member.
-    """
     db_faculty = models.Faculty(name=faculty.name, email=faculty.email)
     db.add(db_faculty)
     db.commit()
@@ -112,16 +259,10 @@ def create_faculty(faculty: schemas.FacultyCreate, db: Session = Depends(get_db)
 
 @app.get("/faculty/", response_model=list[schemas.FacultyRead])
 def read_faculty(db: Session = Depends(get_db)):
-    """
-    Get a list of all faculty.
-    """
     return db.query(models.Faculty).all()
 
 @app.get("/faculty/{faculty_id}", response_model=schemas.FacultyRead)
 def read_faculty_by_id(faculty_id: int, db: Session = Depends(get_db)):
-    """
-    Get a specific faculty by ID.
-    """
     faculty = db.query(models.Faculty).filter(models.Faculty.id == faculty_id).first()
     if faculty is None:
         raise HTTPException(status_code=404, detail="Faculty not found")
@@ -129,9 +270,6 @@ def read_faculty_by_id(faculty_id: int, db: Session = Depends(get_db)):
 
 @app.put("/faculty/{faculty_id}", response_model=schemas.FacultyRead)
 def update_faculty(faculty_id: int, faculty: schemas.FacultyCreate, db: Session = Depends(get_db)):
-    """
-    Update a specific faculty's details.
-    """
     db_faculty = db.query(models.Faculty).filter(models.Faculty.id == faculty_id).first()
     if db_faculty is None:
         raise HTTPException(status_code=404, detail="Faculty not found")
@@ -141,11 +279,8 @@ def update_faculty(faculty_id: int, faculty: schemas.FacultyCreate, db: Session 
     db.refresh(db_faculty)
     return db_faculty
 
-@app.delete("/faculty/{faculty_id}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/faculty/{faculty_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(admin_required)])
 def delete_faculty(faculty_id: int, db: Session = Depends(get_db)):
-    """
-    Delete a faculty member by ID.
-    """
     db_faculty = db.query(models.Faculty).filter(models.Faculty.id == faculty_id).first()
     if db_faculty is None:
         raise HTTPException(status_code=404, detail="Faculty not found")
@@ -153,15 +288,12 @@ def delete_faculty(faculty_id: int, db: Session = Depends(get_db)):
     db.commit()
     return None
 
-# --------------------
-# Course CRUD Endpoints
-# --------------------
+# =======================
+# COURSE CRUD ENDPOINTS
+# =======================
 
 @app.post("/courses/", response_model=schemas.CourseRead)
 def create_course(course: schemas.CourseCreate, db: Session = Depends(get_db)):
-    """
-    Create a new course (faculty_id must exist).
-    """
     faculty = db.query(models.Faculty).filter(models.Faculty.id == course.faculty_id).first()
     if faculty is None:
         raise HTTPException(status_code=404, detail="Faculty not found")
@@ -177,16 +309,10 @@ def create_course(course: schemas.CourseCreate, db: Session = Depends(get_db)):
 
 @app.get("/courses/", response_model=list[schemas.CourseRead])
 def read_courses(db: Session = Depends(get_db)):
-    """
-    Get a list of all courses.
-    """
     return db.query(models.Course).all()
 
 @app.get("/courses/{course_id}", response_model=schemas.CourseRead)
 def read_course_by_id(course_id: int, db: Session = Depends(get_db)):
-    """
-    Get a specific course by ID.
-    """
     course = db.query(models.Course).filter(models.Course.id == course_id).first()
     if course is None:
         raise HTTPException(status_code=404, detail="Course not found")
@@ -194,13 +320,9 @@ def read_course_by_id(course_id: int, db: Session = Depends(get_db)):
 
 @app.put("/courses/{course_id}", response_model=schemas.CourseRead)
 def update_course(course_id: int, course: schemas.CourseCreate, db: Session = Depends(get_db)):
-    """
-    Update a specific course's details.
-    """
     db_course = db.query(models.Course).filter(models.Course.id == course_id).first()
     if db_course is None:
         raise HTTPException(status_code=404, detail="Course not found")
-    # Validate faculty
     faculty = db.query(models.Faculty).filter(models.Faculty.id == course.faculty_id).first()
     if faculty is None:
         raise HTTPException(status_code=404, detail="Faculty not found")
@@ -211,11 +333,8 @@ def update_course(course_id: int, course: schemas.CourseCreate, db: Session = De
     db.refresh(db_course)
     return db_course
 
-@app.delete("/courses/{course_id}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/courses/{course_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(admin_required)])
 def delete_course(course_id: int, db: Session = Depends(get_db)):
-    """
-    Delete a course by ID.
-    """
     db_course = db.query(models.Course).filter(models.Course.id == course_id).first()
     if db_course is None:
         raise HTTPException(status_code=404, detail="Course not found")
@@ -223,29 +342,19 @@ def delete_course(course_id: int, db: Session = Depends(get_db)):
     db.commit()
     return None
 
-# ---- Day 10: Filter Courses by Faculty ----
-
 @app.get("/courses/filter/", response_model=list[schemas.CourseRead])
 def filter_courses(faculty_id: int = None, db: Session = Depends(get_db)):
-    """
-    Get courses taught by a specific faculty member.
-    """
     query = db.query(models.Course)
     if faculty_id:
         query = query.filter(models.Course.faculty_id == faculty_id)
     return query.all()
 
-# ------------------------
-# Enrollment CRUD Endpoints
-# ------------------------
+# ===========================
+# ENROLLMENT CRUD ENDPOINTS
+# ===========================
 
 @app.post("/enrollments/", response_model=schemas.EnrollmentRead)
 def create_enrollment(enrollment: schemas.EnrollmentCreate, db: Session = Depends(get_db)):
-    """
-    Enroll a student in a course.
-    - Validates student and course existence.
-    - Prevents duplicate enrollment.
-    """
     student = db.query(models.Student).filter(models.Student.id == enrollment.student_id).first()
     if student is None:
         raise HTTPException(status_code=404, detail="Student not found")
@@ -272,28 +381,17 @@ def create_enrollment(enrollment: schemas.EnrollmentCreate, db: Session = Depend
 
 @app.get("/enrollments/", response_model=list[schemas.EnrollmentRead])
 def read_enrollments(db: Session = Depends(get_db)):
-    """
-    Get a list of all enrollments.
-    """
     return db.query(models.Enrollment).all()
 
 @app.get("/enrollments/{enrollment_id}", response_model=schemas.EnrollmentRead)
 def read_enrollment_by_id(enrollment_id: int, db: Session = Depends(get_db)):
-    """
-    Get a specific enrollment by ID.
-    """
     enrollment = db.query(models.Enrollment).filter(models.Enrollment.id == enrollment_id).first()
     if enrollment is None:
         raise HTTPException(status_code=404, detail="Enrollment not found")
     return enrollment
 
-# ---- Day 10: Filter Enrollments by Student or Course ----
-
 @app.get("/enrollments/filter/", response_model=list[schemas.EnrollmentRead])
 def filter_enrollments(student_id: int = None, course_id: int = None, db: Session = Depends(get_db)):
-    """
-    Get enrollments filtered by student_id or course_id.
-    """
     query = db.query(models.Enrollment)
     if student_id:
         query = query.filter(models.Enrollment.student_id == student_id)
@@ -301,13 +399,8 @@ def filter_enrollments(student_id: int = None, course_id: int = None, db: Sessio
         query = query.filter(models.Enrollment.course_id == course_id)
     return query.all()
 
-# ------Grade (Update)-----
-
 @app.put("/enrollments/{enrollment_id}/grade", response_model=schemas.EnrollmentRead)
 def update_enrollment_grade(enrollment_id: int, grade: schemas.GradeAssign, db: Session = Depends(get_db)):
-    """
-    Assign or update the grade for a student's enrollment.
-    """
     db_enrollment = db.query(models.Enrollment).filter(models.Enrollment.id == enrollment_id).first()
     if db_enrollment is None:
         raise HTTPException(status_code=404, detail="Enrollment not found")
@@ -316,11 +409,8 @@ def update_enrollment_grade(enrollment_id: int, grade: schemas.GradeAssign, db: 
     db.refresh(db_enrollment)
     return db_enrollment
 
-@app.delete("/enrollments/{enrollment_id}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/enrollments/{enrollment_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(admin_required)])
 def delete_enrollment(enrollment_id: int, db: Session = Depends(get_db)):
-    """
-    Remove a student from a course (delete an enrollment).
-    """
     db_enrollment = db.query(models.Enrollment).filter(models.Enrollment.id == enrollment_id).first()
     if db_enrollment is None:
         raise HTTPException(status_code=404, detail="Enrollment not found")
@@ -328,9 +418,9 @@ def delete_enrollment(enrollment_id: int, db: Session = Depends(get_db)):
     db.commit()
     return None
 
-# --------------
-# Root Endpoint
-# --------------
+# =================
+# ROOT ENDPOINT
+# =================
 
 @app.get("/")
 async def root():

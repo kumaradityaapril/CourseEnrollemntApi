@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, ConfigDict, constr
 from typing import List, Optional
 from enum import Enum
 
@@ -12,8 +12,7 @@ class StudentCreate(StudentBase):
 
 class StudentRead(StudentBase):
     id: int
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # Faculty schemas
 class FacultyBase(BaseModel):
@@ -25,8 +24,7 @@ class FacultyCreate(FacultyBase):
 
 class FacultyRead(FacultyBase):
     id: int
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # Course schemas
 class CourseBase(BaseModel):
@@ -39,8 +37,7 @@ class CourseCreate(CourseBase):
 class CourseRead(CourseBase):
     id: int
     faculty_id: int
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # Enrollment schemas
 class EnrollmentBase(BaseModel):
@@ -53,8 +50,7 @@ class EnrollmentCreate(EnrollmentBase):
 class EnrollmentRead(EnrollmentBase):
     id: int
     grade: Optional[str] = None
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # Enum and schema for assigning/updating grade
 class GradeEnum(str, Enum):
@@ -68,3 +64,16 @@ class GradeEnum(str, Enum):
 
 class GradeAssign(BaseModel):
     grade: GradeEnum
+
+class UserBase(BaseModel):
+    username: str
+    email: EmailStr
+    role: str
+
+class UserCreate(UserBase):
+    password: constr(min_length=6, max_length=72)
+
+class UserRead(UserBase):
+    id: int
+    model_config = ConfigDict(from_attributes=True)
+
