@@ -9,116 +9,49 @@ import bcrypt
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
+from typing import List
 
 app = FastAPI()
 Base.metadata.create_all(bind=engine)
 
-# Try to initialize passlib, but fall back to bcrypt if it fails
+# ====== Security Setup ======
 try:
     pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-    # Force initialization with a safe password
     _ = pwd_context.hash("test")
     USE_PASSLIB = True
-except (ValueError, Exception) as e:
-    # If passlib initialization fails (e.g., 72-byte limit error), use bcrypt directly
+except Exception:
     USE_PASSLIB = False
     pwd_context = None
-SECRET_KEY = "your_random_secret_key_123"  # Replace for production use!
+
+SECRET_KEY = "your_random_secret_key_123"  # Change to a secure value in production!
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
 
-# =======================
-# SECURITY UTILITIES
-# =======================
-
-def _ensure_password_max_bytes(password: str, max_bytes: int = 72) -> str:
-    """Ensure password is at most max_bytes when encoded as UTF-8."""
-    if not password:
-        return password
-    
-    # Encode to bytes to check length
-    password_bytes = password.encode('utf-8')
-    
-    # If already within limit, return as-is
-    if len(password_bytes) <= max_bytes:
-        return password
-    
-    # Truncate to max_bytes (bcrypt's limit)
-    truncated_bytes = password_bytes[:max_bytes]
-    
-    # Remove any incomplete UTF-8 sequence at the end
-    # UTF-8 continuation bytes have pattern 10xxxxxx (0x80-0xBF)
-    while truncated_bytes and (truncated_bytes[-1] & 0b11000000) == 0b10000000:
-        truncated_bytes = truncated_bytes[:-1]
-        if len(truncated_bytes) == 0:
-            return ""
-    
-    # Decode back to string
-    password_str = truncated_bytes.decode('utf-8', errors='ignore')
-    
-    # Critical: Verify the decoded string is still <= max_bytes when re-encoded
-    # Keep removing characters until it fits
-    while len(password_str.encode('utf-8')) > max_bytes:
-        if len(password_str) == 0:
-            break
-        password_str = password_str[:-1]
-    
-    return password_str
-
-def get_password_hash(password):
-    # Bcrypt has a 72-byte limit, so truncate if necessary
-    password = _ensure_password_max_bytes(password, 72)
-    
-    # Final verification: ensure password is definitely <= 72 bytes
-    password_bytes = password.encode('utf-8')
-    if len(password_bytes) > 72:
-        # Emergency fallback: truncate to exactly 72 bytes and remove incomplete UTF-8
-        truncated = password_bytes[:72]
-        while truncated and (truncated[-1] & 0b11000000) == 0b10000000:
-            truncated = truncated[:-1]
-        password = truncated.decode('utf-8', errors='ignore')
-        password_bytes = password.encode('utf-8')
-    
-    # Verify one more time
-    final_bytes = password.encode('utf-8')
-    if len(final_bytes) > 72:
-        raise ValueError(f"Password encoding error: {len(final_bytes)} bytes > 72")
-    
-    # Use bcrypt directly if passlib failed to initialize
+def get_password_hash(password: str):
+    password_bytes = password.encode('utf-8')[:72]
+    password = password_bytes.decode('utf-8', errors='ignore')
     if not USE_PASSLIB:
         salt = bcrypt.gensalt()
-        hashed = bcrypt.hashpw(final_bytes, salt)
+        hashed = bcrypt.hashpw(password.encode(), salt)
         return hashed.decode('utf-8')
-    
-    # Try passlib, but fall back to bcrypt if it fails
     try:
         return pwd_context.hash(password)
-    except (ValueError, Exception) as e:
-        if "password cannot be longer than 72 bytes" in str(e):
-            # Fall back to bcrypt directly
-            salt = bcrypt.gensalt()
-            hashed = bcrypt.hashpw(final_bytes, salt)
-            return hashed.decode('utf-8')
-        raise
+    except Exception:
+        salt = bcrypt.gensalt()
+        hashed = bcrypt.hashpw(password.encode(), salt)
+        return hashed.decode('utf-8')
 
 def verify_password(plain_password, hashed_password):
-    # Apply same truncation as in get_password_hash for consistency
-    plain_password = _ensure_password_max_bytes(plain_password, 72)
-    plain_password_bytes = plain_password.encode('utf-8')
-    hashed_password_bytes = hashed_password.encode('utf-8')
-    
-    # Use bcrypt directly if passlib failed to initialize
+    pw = plain_password.encode('utf-8')[:72]
+    pw = pw.decode('utf-8', errors='ignore')
     if not USE_PASSLIB:
-        return bcrypt.checkpw(plain_password_bytes, hashed_password_bytes)
-    
-    # Try passlib, but fall back to bcrypt if it fails
+        return bcrypt.checkpw(pw.encode(), hashed_password.encode())
     try:
-        return pwd_context.verify(plain_password, hashed_password)
-    except (ValueError, Exception):
-        # Fall back to bcrypt directly
-        return bcrypt.checkpw(plain_password_bytes, hashed_password_bytes)
+        return pwd_context.verify(pw, hashed_password)
+    except Exception:
+        return bcrypt.checkpw(pw.encode(), hashed_password.encode())
 
 def create_access_token(data: dict, expires_delta: timedelta = None):
     to_encode = data.copy()
@@ -149,9 +82,6 @@ def admin_required(current_user=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Admins only")
     return current_user
 
-# =======================
-# DATABASE SESSION DEP
-# =======================
 def get_db():
     db = SessionLocal()
     try:
@@ -159,18 +89,20 @@ def get_db():
     finally:
         db.close()
 
-# =======================
-# USER AUTHENTICATION
-# =======================
-
+# ====== User Authentication ======
 @app.post("/users/", response_model=schemas.UserRead)
 def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    """
+    Register a new user (admin, faculty, or student).
+    """
+    if db.query(models.User).filter((models.User.username == user.username) | (models.User.email == user.email)).first():
+        raise HTTPException(status_code=409, detail="Username or email already exists.")
     hashed_pw = get_password_hash(user.password)
     db_user = models.User(
         username=user.username,
         email=user.email,
         password_hash=hashed_pw,
-        role=user.role  # "admin", "faculty", "student"
+        role=user.role
     )
     db.add(db_user)
     db.commit()
@@ -182,6 +114,9 @@ def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
+    """
+    User login (returns JWT access token).
+    """
     user = db.query(models.User).filter(models.User.username == form_data.username).first()
     if not user or not verify_password(form_data.password, user.password_hash):
         raise HTTPException(status_code=400, detail="Incorrect username or password")
@@ -190,24 +125,66 @@ def login_for_access_token(
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
-# =======================
-# STUDENT CRUD ENDPOINTS
-# =======================
+# ====== Day 13: User Management (Admin only) ======
+@app.get("/users/", response_model=List[schemas.UserRead], dependencies=[Depends(admin_required)])
+def list_users(db: Session = Depends(get_db)):
+    """
+    List all registered users (admin only).
+    """
+    return db.query(models.User).all()
 
+@app.get("/users/{user_id}", response_model=schemas.UserRead, dependencies=[Depends(admin_required)])
+def get_user(user_id: int, db: Session = Depends(get_db)):
+    """
+    Get details of a specific user (admin only).
+    """
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+from pydantic import BaseModel
+
+class RoleUpdate(BaseModel):
+    role: str
+
+@app.patch("/users/{user_id}/role", response_model=schemas.UserRead, dependencies=[Depends(admin_required)])
+def update_user_role(user_id: int, role_update: RoleUpdate, db: Session = Depends(get_db)):
+    """
+    Update a user's role (admin only).
+    """
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.role = role_update.role
+    db.commit()
+    db.refresh(user)
+    return user
+
+# ========== Student CRUD ==========
 @app.post("/students/", response_model=schemas.StudentRead, status_code=status.HTTP_201_CREATED)
 def create_student(student: schemas.StudentCreate, db: Session = Depends(get_db)):
+    """
+    Create a new student record.
+    """
     db_student = models.Student(name=student.name, email=student.email)
     db.add(db_student)
     db.commit()
     db.refresh(db_student)
     return db_student
 
-@app.get("/students/", response_model=list[schemas.StudentRead])
+@app.get("/students/", response_model=List[schemas.StudentRead])
 def read_students(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
+    """
+    List all students (paginated).
+    """
     return db.query(models.Student).offset(skip).limit(limit).all()
 
 @app.get("/students/{student_id}", response_model=schemas.StudentRead)
 def read_student(student_id: int, db: Session = Depends(get_db)):
+    """
+    Get a student by their ID.
+    """
     student = db.query(models.Student).filter(models.Student.id == student_id).first()
     if student is None:
         raise HTTPException(status_code=404, detail="Student not found")
@@ -215,6 +192,9 @@ def read_student(student_id: int, db: Session = Depends(get_db)):
 
 @app.put("/students/{student_id}", response_model=schemas.StudentRead)
 def update_student(student_id: int, student: schemas.StudentCreate, db: Session = Depends(get_db)):
+    """
+    Update an existing student's information.
+    """
     db_student = db.query(models.Student).filter(models.Student.id == student_id).first()
     if db_student is None:
         raise HTTPException(status_code=404, detail="Student not found")
@@ -226,6 +206,9 @@ def update_student(student_id: int, student: schemas.StudentCreate, db: Session 
 
 @app.delete("/students/{student_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(admin_required)])
 def delete_student(student_id: int, db: Session = Depends(get_db)):
+    """
+    Delete a student (admin only).
+    """
     db_student = db.query(models.Student).filter(models.Student.id == student_id).first()
     if db_student is None:
         raise HTTPException(status_code=404, detail="Student not found")
@@ -235,6 +218,9 @@ def delete_student(student_id: int, db: Session = Depends(get_db)):
 
 @app.get("/students/{student_id}/grades/")
 def get_student_grades(student_id: int, db: Session = Depends(get_db)):
+    """
+    Get all enrollments and grades for a student.
+    """
     enrollments = db.query(models.Enrollment).filter(models.Enrollment.student_id == student_id).all()
     return [
         {
@@ -245,10 +231,7 @@ def get_student_grades(student_id: int, db: Session = Depends(get_db)):
         for e in enrollments
     ]
 
-# =======================
-# FACULTY CRUD ENDPOINTS
-# =======================
-
+# ========== Faculty CRUD ==========
 @app.post("/faculty/", response_model=schemas.FacultyRead)
 def create_faculty(faculty: schemas.FacultyCreate, db: Session = Depends(get_db)):
     db_faculty = models.Faculty(name=faculty.name, email=faculty.email)
@@ -257,7 +240,7 @@ def create_faculty(faculty: schemas.FacultyCreate, db: Session = Depends(get_db)
     db.refresh(db_faculty)
     return db_faculty
 
-@app.get("/faculty/", response_model=list[schemas.FacultyRead])
+@app.get("/faculty/", response_model=List[schemas.FacultyRead])
 def read_faculty(db: Session = Depends(get_db)):
     return db.query(models.Faculty).all()
 
@@ -288,10 +271,7 @@ def delete_faculty(faculty_id: int, db: Session = Depends(get_db)):
     db.commit()
     return None
 
-# =======================
-# COURSE CRUD ENDPOINTS
-# =======================
-
+# ========== Course CRUD ==========
 @app.post("/courses/", response_model=schemas.CourseRead)
 def create_course(course: schemas.CourseCreate, db: Session = Depends(get_db)):
     faculty = db.query(models.Faculty).filter(models.Faculty.id == course.faculty_id).first()
@@ -307,7 +287,7 @@ def create_course(course: schemas.CourseCreate, db: Session = Depends(get_db)):
     db.refresh(db_course)
     return db_course
 
-@app.get("/courses/", response_model=list[schemas.CourseRead])
+@app.get("/courses/", response_model=List[schemas.CourseRead])
 def read_courses(db: Session = Depends(get_db)):
     return db.query(models.Course).all()
 
@@ -342,17 +322,14 @@ def delete_course(course_id: int, db: Session = Depends(get_db)):
     db.commit()
     return None
 
-@app.get("/courses/filter/", response_model=list[schemas.CourseRead])
+@app.get("/courses/filter/", response_model=List[schemas.CourseRead])
 def filter_courses(faculty_id: int = None, db: Session = Depends(get_db)):
     query = db.query(models.Course)
     if faculty_id:
         query = query.filter(models.Course.faculty_id == faculty_id)
     return query.all()
 
-# ===========================
-# ENROLLMENT CRUD ENDPOINTS
-# ===========================
-
+# ========== Enrollment CRUD ==========
 @app.post("/enrollments/", response_model=schemas.EnrollmentRead)
 def create_enrollment(enrollment: schemas.EnrollmentCreate, db: Session = Depends(get_db)):
     student = db.query(models.Student).filter(models.Student.id == enrollment.student_id).first()
@@ -379,7 +356,7 @@ def create_enrollment(enrollment: schemas.EnrollmentCreate, db: Session = Depend
     db.refresh(db_enrollment)
     return db_enrollment
 
-@app.get("/enrollments/", response_model=list[schemas.EnrollmentRead])
+@app.get("/enrollments/", response_model=List[schemas.EnrollmentRead])
 def read_enrollments(db: Session = Depends(get_db)):
     return db.query(models.Enrollment).all()
 
@@ -390,7 +367,7 @@ def read_enrollment_by_id(enrollment_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Enrollment not found")
     return enrollment
 
-@app.get("/enrollments/filter/", response_model=list[schemas.EnrollmentRead])
+@app.get("/enrollments/filter/", response_model=List[schemas.EnrollmentRead])
 def filter_enrollments(student_id: int = None, course_id: int = None, db: Session = Depends(get_db)):
     query = db.query(models.Enrollment)
     if student_id:
@@ -418,10 +395,7 @@ def delete_enrollment(enrollment_id: int, db: Session = Depends(get_db)):
     db.commit()
     return None
 
-# =================
-# ROOT ENDPOINT
-# =================
-
+# ===== Root endpoint =====
 @app.get("/")
 async def root():
     return {"message": "Hello, FastAPI!"}

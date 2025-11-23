@@ -1,11 +1,12 @@
 from pydantic import BaseModel, EmailStr, ConfigDict, constr
 from typing import List, Optional
 from enum import Enum
+from pydantic import Field
 
 # Student schemas
 class StudentBase(BaseModel):
-    name: str
-    email: EmailStr
+    name: str = Field(..., description="Full name of the student")
+    email: EmailStr = Field(..., description="Unique student email address")
 
 class StudentCreate(StudentBase):
     pass
