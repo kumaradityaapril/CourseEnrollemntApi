@@ -2,6 +2,7 @@ from .user import (
     UserBase,
     UserCreate,
     UserRead,
+    UserUpdate,
     PasswordChangeRequest,
     RoleUpdate,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "UserBase",
     "UserCreate",
     "UserRead",
+    "UserUpdate",
     "PasswordChangeRequest",
     "RoleUpdate",
     "StudentBase",

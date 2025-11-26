@@ -128,6 +128,45 @@ def change_password(
     return {"detail": "Password changed successfully."}
 
 
+@router.patch("/{user_id}", response_model=schemas.UserRead)
+def update_user_profile(
+    user_id: int,
+    user_update: schemas.UserUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Update user profile (username and/or email). Users can update their own profile, admins can update any profile."""
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
+    if current_user.id != user.id and current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not allowed to update profile",
+        )
+    if user_update.email and user_update.email != user.email:
+        if db.query(models.User).filter(models.User.email == user_update.email).first():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="Email already in use"
+            )
+        user.email = user_update.email
+    if user_update.username and user_update.username != user.username:
+        if (
+            db.query(models.User)
+            .filter(models.User.username == user_update.username)
+            .first()
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="Username already in use"
+            )
+        user.username = user_update.username
+    db.commit()
+    db.refresh(user)
+    return user
+
+
 @router.post(
     "/{user_id}/disable",
     dependencies=[Depends(admin_required)],
@@ -141,4 +180,28 @@ def disable_user(user_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
     user_crud.disable_user(db, user)
     return {"detail": f"User {user.username} disabled."}
+
+
+@router.post(
+    "/{user_id}/enable",
+    response_model=schemas.UserRead,
+    dependencies=[Depends(admin_required)],
+)
+def enable_user(user_id: int, db: Session = Depends(get_db)):
+    """
+    Admin enables a user, allowing them to log in and use the API again.
+    """
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
+    if user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="User is already active"
+        )
+    user.is_active = True
+    db.commit()
+    db.refresh(user)
+    return user
 

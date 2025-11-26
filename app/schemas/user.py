@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, ConfigDict, constr
-
+from typing import Optional
 
 class UserBase(BaseModel):
     username: str
@@ -24,3 +24,6 @@ class PasswordChangeRequest(BaseModel):
     old_password: constr(min_length=6, max_length=72)
     new_password: constr(min_length=6, max_length=72)
 
+class UserUpdate(BaseModel):
+    username: Optional[str] = None
+    email: Optional[EmailStr] = None
