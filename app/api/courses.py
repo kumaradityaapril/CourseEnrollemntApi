@@ -1,6 +1,6 @@
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app import schemas, models
@@ -22,8 +22,22 @@ def create_course(course: schemas.CourseCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/", response_model=List[schemas.CourseRead])
-def read_courses(db: Session = Depends(get_db)):
-    return course_crud.list_courses(db)
+def read_courses(
+    skip: int = 0,
+    limit: int = 10,
+    name: Optional[str] = Query(None, description="Filter by course name (partial match)"),
+    credits: Optional[int] = Query(None, description="Filter by credit count"),
+    faculty_id: Optional[int] = Query(None, description="Filter by faculty ID"),
+    db: Session = Depends(get_db),
+):
+    query = db.query(models.Course)
+    if name:
+        query = query.filter(models.Course.name.ilike(f"%{name}%"))
+    if credits is not None:
+        query = query.filter(models.Course.credits == credits)
+    if faculty_id is not None:
+        query = query.filter(models.Course.faculty_id == faculty_id)
+    return query.offset(skip).limit(limit).all()
 
 
 @router.get("/{course_id}", response_model=schemas.CourseRead)
@@ -66,8 +80,4 @@ def delete_course(course_id: int, db: Session = Depends(get_db)):
         )
     course_crud.delete_course(db, db_course)
 
-
-@router.get("/filter/", response_model=List[schemas.CourseRead])
-def filter_courses(faculty_id: int | None = None, db: Session = Depends(get_db)):
-    return course_crud.filter_courses(db, faculty_id)
 

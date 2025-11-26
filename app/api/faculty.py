@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 
 from app import schemas
+from app.models.faculty import Faculty
 from app.core.security import admin_required
 from app.crud import faculty as faculty_crud
 from app.db.database import get_db
@@ -16,8 +17,19 @@ def create_faculty(faculty: schemas.FacultyCreate, db: Session = Depends(get_db)
 
 
 @router.get("/", response_model=List[schemas.FacultyRead])
-def read_faculty(db: Session = Depends(get_db)):
-    return faculty_crud.list_faculty(db)
+def read_faculty(
+    skip: int = 0,
+    limit: int = 10,
+    name: Optional[str] = Query(None, description="Filter by name (partial match)"),
+    email: Optional[str] = Query(None, description="Filter by email (partial match)"),
+    db: Session = Depends(get_db),
+):
+    query = db.query(Faculty)
+    if name:
+        query = query.filter(Faculty.name.ilike(f"%{name}%"))
+    if email:
+        query = query.filter(Faculty.email.ilike(f"%{email}%"))
+    return query.offset(skip).limit(limit).all()
 
 
 @router.get("/{faculty_id}", response_model=schemas.FacultyRead)

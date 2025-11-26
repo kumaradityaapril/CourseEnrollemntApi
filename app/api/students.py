@@ -1,9 +1,10 @@
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app import models, schemas
+from app.models.student import Student
 from app.core.security import admin_required
 from app.crud import student as student_crud
 from app.db.database import get_db
@@ -19,8 +20,23 @@ def create_student(student: schemas.StudentCreate, db: Session = Depends(get_db)
 
 
 @router.get("/", response_model=List[schemas.StudentRead])
-def read_students(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
-    return student_crud.list_students(db, skip=skip, limit=limit)
+def read_students(
+    skip: int = 0,
+    limit: int = 10,
+    name: Optional[str] = Query(
+        None, description="Filter by name (partial match)"
+    ),
+    email: Optional[str] = Query(
+        None, description="Filter by email (partial match)"
+    ),
+    db: Session = Depends(get_db),
+):
+    query = db.query(Student)
+    if name:
+        query = query.filter(Student.name.ilike(f"%{name}%"))
+    if email:
+        query = query.filter(Student.email.ilike(f"%{email}%"))
+    return query.offset(skip).limit(limit).all()
 
 
 @router.get("/{student_id}", response_model=schemas.StudentRead)
