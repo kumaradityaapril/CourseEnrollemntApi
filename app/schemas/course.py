@@ -1,3 +1,5 @@
+from typing import List
+
 from pydantic import BaseModel, ConfigDict
 
 
@@ -14,4 +16,9 @@ class CourseRead(CourseBase):
     id: int
     faculty_id: int
     model_config = ConfigDict(from_attributes=True)
+
+
+class CourseList(BaseModel):
+    total: int
+    items: List[CourseRead]
 

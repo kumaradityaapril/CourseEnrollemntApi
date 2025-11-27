@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -19,7 +19,7 @@ def create_student(student: schemas.StudentCreate, db: Session = Depends(get_db)
     return student_crud.create_student(db, student)
 
 
-@router.get("/", response_model=List[schemas.StudentRead])
+@router.get("/", response_model=schemas.StudentList)
 def read_students(
     skip: int = 0,
     limit: int = 10,
@@ -36,7 +36,9 @@ def read_students(
         query = query.filter(Student.name.ilike(f"%{name}%"))
     if email:
         query = query.filter(Student.email.ilike(f"%{email}%"))
-    return query.offset(skip).limit(limit).all()
+    total = query.count()
+    items = query.offset(skip).limit(limit).all()
+    return {"total": total, "items": items}
 
 
 @router.get("/{student_id}", response_model=schemas.StudentRead)

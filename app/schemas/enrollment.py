@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -17,6 +17,11 @@ class EnrollmentRead(EnrollmentBase):
     id: int
     grade: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
+
+
+class EnrollmentList(BaseModel):
+    total: int
+    items: List[EnrollmentRead]
 
 
 class GradeEnum(str, Enum):

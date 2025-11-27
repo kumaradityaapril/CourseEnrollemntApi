@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -21,7 +21,7 @@ def create_course(course: schemas.CourseCreate, db: Session = Depends(get_db)):
     return course_crud.create_course(db, course)
 
 
-@router.get("/", response_model=List[schemas.CourseRead])
+@router.get("/", response_model=schemas.CourseList)
 def read_courses(
     skip: int = 0,
     limit: int = 10,
@@ -37,7 +37,9 @@ def read_courses(
         query = query.filter(models.Course.credits == credits)
     if faculty_id is not None:
         query = query.filter(models.Course.faculty_id == faculty_id)
-    return query.offset(skip).limit(limit).all()
+    total = query.count()
+    items = query.offset(skip).limit(limit).all()
+    return {"total": total, "items": items}
 
 
 @router.get("/{course_id}", response_model=schemas.CourseRead)

@@ -36,9 +36,16 @@ def create_enrollment(
     return enrollment_crud.create_enrollment(db, enrollment)
 
 
-@router.get("/", response_model=List[schemas.EnrollmentRead])
-def read_enrollments(db: Session = Depends(get_db)):
-    return enrollment_crud.list_enrollments(db)
+@router.get("/", response_model=schemas.EnrollmentList)
+def read_enrollments(
+    skip: int = 0,
+    limit: int = 10,
+    db: Session = Depends(get_db),
+):
+    query = db.query(models.Enrollment)
+    total = query.count()
+    items = query.offset(skip).limit(limit).all()
+    return {"total": total, "items": items}
 
 
 @router.get("/{enrollment_id}", response_model=schemas.EnrollmentRead)

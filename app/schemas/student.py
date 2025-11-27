@@ -1,3 +1,5 @@
+from typing import List
+
 from pydantic import BaseModel, EmailStr, ConfigDict, Field
 
 
@@ -13,4 +15,9 @@ class StudentCreate(StudentBase):
 class StudentRead(StudentBase):
     id: int
     model_config = ConfigDict(from_attributes=True)
+
+
+class StudentList(BaseModel):
+    total: int
+    items: List[StudentRead]
 

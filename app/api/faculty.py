@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import Optional
 
 from app import schemas
 from app.models.faculty import Faculty
@@ -16,7 +16,7 @@ def create_faculty(faculty: schemas.FacultyCreate, db: Session = Depends(get_db)
     return faculty_crud.create_faculty(db, faculty)
 
 
-@router.get("/", response_model=List[schemas.FacultyRead])
+@router.get("/", response_model=schemas.FacultyList)
 def read_faculty(
     skip: int = 0,
     limit: int = 10,
@@ -29,7 +29,9 @@ def read_faculty(
         query = query.filter(Faculty.name.ilike(f"%{name}%"))
     if email:
         query = query.filter(Faculty.email.ilike(f"%{email}%"))
-    return query.offset(skip).limit(limit).all()
+    total = query.count()
+    items = query.offset(skip).limit(limit).all()
+    return {"total": total, "items": items}
 
 
 @router.get("/{faculty_id}", response_model=schemas.FacultyRead)
