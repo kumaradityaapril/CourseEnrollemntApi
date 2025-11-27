@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app import models, schemas
-from app.core.security import admin_required
+from app.core.security import admin_required, get_current_user
 from app.crud import enrollment as enrollment_crud
 from app.db.database import get_db
 
@@ -69,8 +69,16 @@ def filter_enrollments(
 
 @router.put("/{enrollment_id}/grade", response_model=schemas.EnrollmentRead)
 def update_enrollment_grade(
-    enrollment_id: int, grade: schemas.GradeAssign, db: Session = Depends(get_db)
+    enrollment_id: int,
+    grade: schemas.GradeAssign,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
+    if current_user.role not in ("admin", "faculty"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only faculty or admin can assign grades.",
+        )
     db_enrollment = enrollment_crud.get_enrollment(db, enrollment_id)
     if db_enrollment is None:
         raise HTTPException(
@@ -91,4 +99,51 @@ def delete_enrollment(enrollment_id: int, db: Session = Depends(get_db)):
             status_code=status.HTTP_404_NOT_FOUND, detail="Enrollment not found"
         )
     enrollment_crud.delete_enrollment(db, db_enrollment)
+
+
+@router.get("/reports/course/{course_id}/grades")
+def course_grades_report(
+    course_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    List all students with their grades for a given course.
+    Restricted to faculty and admin roles.
+    """
+    if current_user.role not in ("admin", "faculty"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only faculty or admin can view course grade reports.",
+        )
+
+    course = db.query(models.Course).filter(models.Course.id == course_id).first()
+    if not course:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Course not found")
+
+    enrollments = (
+        db.query(models.Enrollment, models.Student)
+        .join(models.Student, models.Student.id == models.Enrollment.student_id)
+        .filter(models.Enrollment.course_id == course_id)
+        .all()
+    )
+
+    records = [
+        {
+            "student_id": student.id,
+            "student_name": student.name,
+            "student_email": student.email,
+            "course_id": course.id,
+            "course_name": course.name,
+            "grade": enrollment.grade,
+        }
+        for enrollment, student in enrollments
+    ]
+
+    return {
+        "course_id": course.id,
+        "course_name": course.name,
+        "total_students": len(records),
+        "records": records,
+    }
 
